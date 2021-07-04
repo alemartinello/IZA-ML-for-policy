@@ -1,1 +1,6 @@
 .venv/
+.vscode
+data
+*/.ipynb_checkpoints/*
+*/__pycache__/*
+setup.cfg
