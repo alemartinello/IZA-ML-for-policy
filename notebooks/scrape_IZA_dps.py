@@ -93,7 +93,7 @@ def get_dp_data(dp_number, prefix=prefix, max_retries=1) -> dict:
         return None
 
 
-savefile = Path('../data/IZA_dps.json')
+savefile = Path('data/IZA_dps.json')
 
 if __name__ == "__main__":
     start = datetime.now()
