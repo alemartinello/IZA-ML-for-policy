@@ -1,3 +1,5 @@
 beautifulsoup4
 jupyterlab
 pandas
+seaborn
+matplotlib
