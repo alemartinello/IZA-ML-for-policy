@@ -111,7 +111,6 @@ class OneHotPd(OneHotEncoder):
         super().__init__(**kwargs)
 
     def transform(self, X):
-        print(super().get_feature_names(X.columns), len(super().get_feature_names(X.columns)))
         return pd.DataFrame(
             super().transform(X), columns=super().get_feature_names(X.columns)
         )
