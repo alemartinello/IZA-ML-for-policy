@@ -194,7 +194,6 @@ def construct_data_pipeline(pd_output=False):
     categorical_pipeline = Pipeline(
         steps=[
             ("cat_selector", FeatureSelector(feat_type["categorical"])),
-            ("nan_filler", NanFiller()),
             ("rare_cat", RareAggregator()),
             ("one_hot", OneHotPd(handle_unknown='ignore', sparse=False)),
         ]
