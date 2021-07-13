@@ -9,8 +9,8 @@ class DML_diagnostics:
     needs to reconstruct the models pairing with the help of a cv_splitter
     """
 
-    def __init__(self, cv_splitter):
-        self.cv_splitter = cv_splitter
+    def __init__(self, model):
+        self.model = model
 
     @staticmethod
     def _select(data, idx):
@@ -23,14 +23,7 @@ class DML_diagnostics:
         else:
             return data[idx]
 
-    def get_ate(model):
-        """
-        Returns ATE of model and confidence interval. Model needs to be a DML model
-        instance
-        """
-        return model.ate(), model.ate_interval()
-
-    def get_score_T(self, model, scoring_function, W, T):
+    def get_score_T(self, scoring_function, W, T, predict_proba='auto'):
         """
         Computes the first stage `scoring_function` from a DML model for the
         treatment variable, where `scoring_function` is a sklearn scoring
@@ -39,15 +32,15 @@ class DML_diagnostics:
         class
         """
         scores = []
-        for k, (train, test) in enumerate(self.cv_splitter.split(W)):
-            if model.discrete_treatment:
-                pred = model.models_t[0][k].predict_proba(self._select(W, test))[:, 1]
+        for k, (train, test) in enumerate(self.model.cv.split(W)):
+            if predict_proba==True or (predict_proba == 'auto' and (self.model.discrete_treatment==True)):
+                pred = self.model.models_t[0][k].predict_proba(self._select(W, test))[:, 1]
             else:
-                pred = model.models_t[0][k].predict(self._select(W, test))
+                pred = self.model.models_t[0][k].predict(self._select(W, test))
             scores += [scoring_function(self._select(T, test), pred)]
         return np.mean(scores)
 
-    def get_score_y(self, model, scoring_function, W, T):
+    def get_score_y(self, scoring_function, W, T):
         """
         Computes the first stage `scoring_function` from a DML model for the
         treatment variable, where `scoring_function` is a sklearn scoring
@@ -56,12 +49,12 @@ class DML_diagnostics:
         class
         """
         scores = []
-        for k, (train, test) in enumerate(self.cv_splitter.split(W)):
-            pred = model.models_y[0][k].predict(self._select(W, test))
+        for k, (train, test) in enumerate(self.model.cv.split(W)):
+            pred = self.model.models_y[0][k].predict(self._select(W, test))
             scores += [scoring_function(self._select(T, test), pred)]
         return np.mean(scores)
 
-    def first_stage_residuals(self, model, y, T, W=None, X=None):
+    def first_stage_residuals(self, y, T, W=None, X=None):
         """
         Computes the first stage residuals from a DML model. Assumes that the
         `cv_splitter` used in the training of the model has been the same used
@@ -79,13 +72,13 @@ class DML_diagnostics:
                 controls = None
 
         res = []
-        for k, (train, test) in enumerate(self.cv_splitter.split(controls)):
-            pred_func = model.models_t[0][k].predict_proba if model.discrete_treatment else model.models_t[0][k].predict
+        for k, (train, test) in enumerate(self.model.cv.split(controls)):
+            pred_func = self.model.models_t[0][k].predict_proba if self.model.discrete_treatment else self.model.models_t[0][k].predict
             res.append(
                 pd.DataFrame(
                     np.vstack(
                         [
-                            self._select(y, test) - model.models_y[0][k].predict(self._select(controls, test)),
+                            self._select(y, test) - self.model.models_y[0][k].predict(self._select(controls, test)),
                             self._select(T, test) - pred_func(self._select(controls, test)).reshape(-1, 1)[:, -1],
                         ]
                     ).T,
@@ -102,6 +95,6 @@ class DML_diagnostics:
         align original data rows to residuals and predictions.
         """
         return pd.concat(
-            [pd.DataFrame(self._select(df, test)) for _, test in self.cv_splitter.split(df)],
+            [pd.DataFrame(self._select(df, test)) for _, test in self.model.cv.split(df)],
             axis=0
         ).sort_index()
