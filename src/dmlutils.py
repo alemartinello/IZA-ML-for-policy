@@ -23,6 +23,34 @@ class DML_diagnostics:
         else:
             return data[idx]
 
+    def predict_T(self, W=None, X=None, predict_proba='auto'):
+        """
+        """
+        if W is not None:
+            if X is not None:
+                controls = np.hstack([X, W])
+            else:
+                controls = W
+        else:
+            if X is not None:
+                controls = X
+            else:
+                controls = None
+        if predict_proba=='auto':
+            predict_proba = self.model.discrete_treatment
+        else: 
+            predict_proba = predict_proba
+
+        res = []
+        for k, (train, test) in enumerate(self.model.cv.split(controls)):
+            pred_func = self.model.models_t[0][k].predict_proba if predict_proba else self.model.models_t[0][k].predict
+            res.append(pd.DataFrame(
+                pred_func(self._select(controls, test)).reshape(-1, 1)[:, -1],
+                columns=['T_pred'], index=test)
+            )
+        
+        return pd.concat(res, axis=0).sort_index()
+
     def get_score_T(self, scoring_function, W, T, predict_proba='auto'):
         """
         Computes the first stage `scoring_function` from a DML model for the
