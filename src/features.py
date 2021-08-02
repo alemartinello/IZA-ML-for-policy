@@ -187,7 +187,7 @@ class PandasFeatureUnion(FeatureUnion):
         return Xs
 
 
-def construct_data_pipeline(pd_output=False):
+def construct_data_pipeline(pd_output=False, feat_type=feat_type):
     """
     Returns a default sklearn pipeline for pre-processing data
     """
@@ -195,7 +195,7 @@ def construct_data_pipeline(pd_output=False):
         steps=[
             ("cat_selector", FeatureSelector(feat_type["categorical"])),
             ("rare_cat", RareAggregator()),
-            ("one_hot", OneHotPd(handle_unknown='ignore', sparse=False)),
+            ("one_hot", OneHotPd(handle_unknown="ignore", sparse=False)),
         ]
     )
     numeric_pipeline = Pipeline(
@@ -213,7 +213,7 @@ def construct_data_pipeline(pd_output=False):
     tlist = [
         ("categorical_pipeline", categorical_pipeline),
         ("numeric_pipeline", numeric_pipeline),
-        ("ordinal_pipeline", ordinal_pipeline)
+        ("ordinal_pipeline", ordinal_pipeline),
     ]
     if pd_output:
         data_pipeline = PandasFeatureUnion(transformer_list=tlist)
