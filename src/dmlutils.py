@@ -162,3 +162,25 @@ class DML_diagnostics:
             ],
             axis=0,
         ).sort_index()
+
+
+def binscatter(x, y, by=None, nbins=50):
+    """
+    """
+    toplot = pd.concat([y, x], axis=1, ignore_index=True)
+    toplot.columns = ['y', 'x']
+    if by is None:
+        output = toplot.groupby(pd.qcut(toplot['x'], 50, duplicates='drop', labels=False)).agg({'y': 'mean', 'x': ['mean', 'count']})
+        output.columns = ['y', 'x', 'count']
+    else:
+        dflist = []
+        for label in set(by):
+            selection = (by == label)
+            selection = np.array(selection)
+            t = toplot[selection]
+            t = t.groupby(pd.qcut(t['x'], 50, duplicates='drop', labels=False)).agg({'y': 'mean', 'x': ['mean', 'count']})
+            t.columns = ['y', 'x', 'count']
+            t['by'] = label
+            dflist.append(t)
+        output = pd.concat(dflist, axis=0)
+    return output
