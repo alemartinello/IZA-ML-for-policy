@@ -113,42 +113,12 @@ class DML_diagnostics:
         `cv_splitter` used in the training of the model has been the same used
         when instantiating the `DML_diagnostics` class
         """
-        if W is not None:
-            if X is not None:
-                controls = np.hstack([X, W])
-            else:
-                controls = W
-        else:
-            if X is not None:
-                controls = X
-            else:
-                controls = None
+        res = pd.DataFrame(np.vstack([
+            (T.values - self.predict_T(X=X)['T_pred'].values),
+            (y.values - self.predict_y(X=X)['y_pred'].values)
+        ]).T, columns=['T', 'y'])
 
-        res = []
-        for k, (train, test) in enumerate(self.model.cv.split(controls)):
-            pred_func = (
-                self.model.models_t[0][k].predict_proba
-                if self.model.discrete_treatment
-                else self.model.models_t[0][k].predict
-            )
-            res.append(
-                pd.DataFrame(
-                    np.vstack(
-                        [
-                            self._select(y, test) - self.model.models_y[0][k].predict(
-                                self._select(controls, test)
-                            ),
-                            self._select(T, test) - pred_func(self._select(controls, test)).reshape(-1, 1)[
-                                :, -1
-                            ],
-                        ]
-                    ).T,
-                    index=test,
-                    columns=["y", "T"],
-                )
-            )
-
-        return pd.concat(res, axis="index").sort_index()
+        return res
 
     def reorder_df_to_splitter(self, df):
         """

@@ -39,6 +39,7 @@ feat_type = {
         "splmU55",
         "lowviol",
         "highviol",
+        "car_age"
     ],
     "numeric": ["thoulbs_I", "numcrash"],
 }
