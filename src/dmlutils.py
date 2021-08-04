@@ -23,9 +23,8 @@ class DML_diagnostics:
         else:
             return data[idx]
 
-    def predict_T(self, W=None, X=None, predict_proba='auto'):
-        """
-        """
+    def predict_T(self, W=None, X=None, predict_proba="auto"):
+        """ """
         if W is not None:
             if X is not None:
                 controls = np.hstack([X, W])
@@ -36,30 +35,39 @@ class DML_diagnostics:
                 controls = X
             else:
                 controls = None
-        if predict_proba=='auto':
+        if predict_proba == "auto":
             predict_proba = self.model.discrete_treatment
-        else: 
+        else:
             predict_proba = predict_proba
 
         res = []
         for k, (train, test) in enumerate(self.model.cv.split(controls)):
-            pred_func = self.model.models_t[0][k].predict_proba if predict_proba else self.model.models_t[0][k].predict
+            pred_func = (
+                self.model.models_t[0][k].predict_proba
+                if predict_proba
+                else self.model.models_t[0][k].predict
+            )
             if predict_proba:
-                res.append(pd.DataFrame(
-                    pred_func(self._select(controls, test))[:, -1].reshape(-1, 1),
-                    columns=['T_pred'], index=test)
+                res.append(
+                    pd.DataFrame(
+                        1 - pred_func(self._select(controls, test))[:, 0].reshape(-1, 1),
+                        columns=["T_pred"],
+                        index=test,
+                    )
                 )
             else:
-                res.append(pd.DataFrame(
-                    pred_func(self._select(controls, test)),
-                    columns=['T_pred'], index=test)
+                res.append(
+                    pd.DataFrame(
+                        pred_func(self._select(controls, test)),
+                        columns=["T_pred"],
+                        index=test,
+                    )
                 )
-        
+
         return pd.concat(res, axis=0).sort_index()
 
-    def predict_y(self, W=None, X=None, predict_proba='auto'):
-        """
-        """
+    def predict_y(self, W=None, X=None, predict_proba="auto"):
+        """ """
         if W is not None:
             if X is not None:
                 controls = np.hstack([X, W])
@@ -70,24 +78,33 @@ class DML_diagnostics:
                 controls = X
             else:
                 controls = None
-        if predict_proba=='auto':
+        if predict_proba == "auto":
             predict_proba = False
 
         res = []
         for k, (train, test) in enumerate(self.model.cv.split(controls)):
-            pred_func = self.model.models_y[0][k].predict_proba if predict_proba else self.model.models_y[0][k].predict
+            pred_func = (
+                self.model.models_y[0][k].predict_proba
+                if predict_proba
+                else self.model.models_y[0][k].predict
+            )
             if predict_proba:
-                res.append(pd.DataFrame(
-                    pred_func(self._select(controls, test))[:, -1].reshape(-1, 1),
-                    columns=['y_pred'], index=test)
+                res.append(
+                    pd.DataFrame(
+                        pred_func(self._select(controls, test))[:, -1].reshape(-1, 1),
+                        columns=["y_pred"],
+                        index=test,
+                    )
                 )
             else:
-                res.append(pd.DataFrame(
-                    pred_func(self._select(controls, test)),
-                    columns=['y_pred'], index=test)
+                res.append(
+                    pd.DataFrame(
+                        pred_func(self._select(controls, test)),
+                        columns=["y_pred"],
+                        index=test,
+                    )
                 )
 
-        
         return pd.concat(res, axis=0).sort_index()
 
     def first_stage_residuals(self, y, T, W=None, X=None):
@@ -109,13 +126,21 @@ class DML_diagnostics:
 
         res = []
         for k, (train, test) in enumerate(self.model.cv.split(controls)):
-            pred_func = self.model.models_t[0][k].predict_proba if self.model.discrete_treatment else self.model.models_t[0][k].predict
+            pred_func = (
+                self.model.models_t[0][k].predict_proba
+                if self.model.discrete_treatment
+                else self.model.models_t[0][k].predict
+            )
             res.append(
                 pd.DataFrame(
                     np.vstack(
                         [
-                            self._select(y, test) - self.model.models_y[0][k].predict(self._select(controls, test)),
-                            self._select(T, test) - pred_func(self._select(controls, test)).reshape(-1, 1)[:, -1],
+                            self._select(y, test) - self.model.models_y[0][k].predict(
+                                self._select(controls, test)
+                            ),
+                            self._select(T, test) - pred_func(self._select(controls, test)).reshape(-1, 1)[
+                                :, -1
+                            ],
                         ]
                     ).T,
                     index=test,
@@ -131,6 +156,31 @@ class DML_diagnostics:
         align original data rows to residuals and predictions.
         """
         return pd.concat(
-            [pd.DataFrame(self._select(df, test)) for _, test in self.model.cv.split(df)],
-            axis=0
+            [
+                pd.DataFrame(self._select(df, test))
+                for _, test in self.model.cv.split(df)
+            ],
+            axis=0,
         ).sort_index()
+
+
+def binscatter(x, y, by=None, nbins=50):
+    """
+    """
+    toplot = pd.concat([y, x], axis=1, ignore_index=True)
+    toplot.columns = ['y', 'x']
+    if by is None:
+        output = toplot.groupby(pd.qcut(toplot['x'], 50, duplicates='drop', labels=False)).agg({'y': 'mean', 'x': ['mean', 'count']})
+        output.columns = ['y', 'x', 'count']
+    else:
+        dflist = []
+        for label in set(by):
+            selection = (by == label)
+            selection = np.array(selection)
+            t = toplot[selection]
+            t = t.groupby(pd.qcut(t['x'], 50, duplicates='drop', labels=False)).agg({'y': 'mean', 'x': ['mean', 'count']})
+            t.columns = ['y', 'x', 'count']
+            t['by'] = label
+            dflist.append(t)
+        output = pd.concat(dflist, axis=0)
+    return output

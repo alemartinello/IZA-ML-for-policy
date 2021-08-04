@@ -3,5 +3,5 @@ jupyterlab
 pandas
 seaborn
 matplotlib
-econml==0.11.1
+econml==0.12.0b4
 scikit-learn==0.24.2
