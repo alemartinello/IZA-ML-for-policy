@@ -1,0 +1,602 @@
+---
+title: "empirical_example_in_R"
+date: "Version: October 5 , 2021"
+output:
+    html_document:
+      toc: true
+      theme: united
+      toc_float: true
+      number_sections: true 
+---
+  
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,warning=FALSE)
+```
+
+
+# Preparations
+
+ 
+## Construction sites
+
+First order: Harmonise results a bit more.
+
+- Features used/pre-processing
+- DML multinomial?
+- Fitted propensities close to zero?
+- Do I overfit?
+
+
+## Notation
+
+- $D$ Treatment indicator (binary or multiarm)
+- $y$ outcome
+- $X$ features/controls
+
+
+## Seed
+
+```{r seed}
+rm(list=ls())
+seed<-1909
+```
+## Libraries
+
+
+```{r libraries}
+# loading & modifying data
+library("readr")         # to read the data
+library("dplyr")         # to manipulate data
+library("fastDummies")   # create dummies
+# charts & tables
+library("ggplot2")       # to create charts
+library("patchwork")     # to combine charts
+library("flextable")     # design tables
+library("modelsummary")  # structure tables
+library("kableExtra")    # design table
+library("estimatr")
+library("ggpubr")
+# regression & analysis
+library("fixest")        # high dimensional FE
+library("skimr")         # skim the data
+# machine learning
+library("policytree")    # policy tree (Athey & Wager, 2021)
+library("grf")           # causal forest
+library("rsample")       # data splitting 
+library("randomForest")  # Traditional Random Forests
+library("mlr3")          # learners
+library("mlr3learners")  # learners
+library("gbm")           # Generalized Boosted Regression
+library("DoubleML")      # Double ML
+```
+
+
+## Load and prepare data
+### Load data
+```{r load_data}
+# load full dataset
+
+df_repl<-read_delim("../data/FARS-data-full-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# load small dataset
+df_sel<-read_delim("../data/FARS-data-selection-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# remove rows with missing cases
+df_repl<-df_repl[complete.cases(df_repl), ]
+df_sel<-df_sel[complete.cases(df_sel), ]
+
+# print number of obs
+print(paste('Number of observations in the data:',nrow(df_repl),' (full sample);',nrow(df_sel), ' (selected/causal sample)'))
+```
+
+
+
+### Manipulate data
+
+```{r manipulate_data}
+# Treatment indicators
+df_repl<-df_repl%>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                      childseat==1~"Childseat",TRUE~"NONE"),
+                          D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                          Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+df_sel <-df_sel %>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                    childseat==1~"Childseat",TRUE~"NONE"),
+                         D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                         Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+# Convert categorical to indicators
+df_repl<-dummy_cols(df_repl%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm)
+df_sel<-dummy_cols(df_sel%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm)
+#df_repl<-df_repl%>%mutate(day=ifelse(crashtm=="1_day",1,0),night=ifelse(crashtm=="2_night",1,0),morn=ifelse(crashtm=="3_morn",1,0))
+#df_sel<- df_sel %>%mutate(day=ifelse(crashtm=="1_day",1,0),night=ifelse(crashtm=="2_night",1,0),morn=ifelse(crashtm=="3_morn",1,0))
+# Select variables
+df_repl<-df_repl%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death,D,Dbinary,modelyr,age,year)
+df_sel<- df_sel %>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death,D,Dbinary,modelyr,age,year)
+
+# Training and test data
+set.seed(seed)
+df_repl_split <- initial_split(df_repl, prop = .5)
+df_repl_train <- training(df_repl_split)
+df_repl_test  <- testing(df_repl_split)
+df_sel_split <- initial_split(df_sel, prop = .5)
+df_sel_train <- training(df_sel_split)
+df_sel_test  <- testing(df_sel_split)
+# X Matrices
+X_repl_train<-as.matrix(df_repl_train%>%select(-death,-D,-Dbinary))
+X_repl_test<- as.matrix(df_repl_test%>%select(-death,-D,-Dbinary))
+X_sel_train<- as.matrix(df_sel_train%>%select(-death,-D,-Dbinary))
+X_sel_test<-  as.matrix(df_sel_test%>%select(-death,-D,-Dbinary))
+X_repl_train_nocontrols<-as.matrix(rep(1,nrow(X_repl_train)))
+X_repl_test_nocontrols<- as.matrix(rep(1,nrow(X_repl_test)))
+X_sel_train_nocontrols<- as.matrix(rep(1,nrow(X_sel_train)))
+X_sel_test_nocontrols<-  as.matrix(rep(1,nrow(X_sel_test)))
+# D matrices
+D_repl_train<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_repl_test<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_train<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_test<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_binary_repl_train<-as.matrix(df_repl_train%>%select(Dbinary))
+D_binary_repl_test<- as.matrix(df_repl_test%>%select(Dbinary))
+D_binary_sel_train<- as.matrix(df_sel_train%>%select(Dbinary))
+D_binary_sel_test<-  as.matrix(df_sel_test%>%select(Dbinary))
+# Y matrices
+Y_repl_train<-as.matrix(df_repl_train%>%select(death))
+Y_repl_test<- as.matrix(df_repl_test%>%select(death))
+Y_sel_train<- as.matrix(df_sel_train%>%select(death))
+Y_sel_test<-  as.matrix(df_sel_test%>%select(death))
+  
+
+```
+
+## Summary statistics
+
+
+```{r summary_statistics, out.width=20}
+tmp <- df_sel%>%select(splmU55,thoulbs_I,modelyr,year,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death)
+# remove missing and rescale
+tmp_list <- lapply(tmp, na.omit)
+tmp_list <- lapply(tmp_list, scale)
+
+emptycol = function(x) " "
+datasummary(splmU55+thoulbs_I+modelyr+year+numcrash+weekend+lowviol+highviol+ruralrd+frimp+suv+death ~ Mean + SD + Heading("Boxplot") * emptycol + Heading("Histogram") * emptycol, data = tmp) %>%
+    column_spec(column = 4, image = spec_boxplot(tmp_list)) %>%
+    column_spec(column = 5, image = spec_hist(tmp_list))
+
+
+```
+
+# Double Machine Learning
+
+
+## Binary treatment
+
+The next cell initializes the DML model, fits them twice (the first time without controls.
+
+
+```{r dml_binary}
+# Create  DML object
+dml_data_nocontrols = double_ml_data_from_matrix(y=Y_repl_train,d=D_binary_repl_train,X_repl_train_nocontrols)
+dml_data_controls = double_ml_data_from_matrix(y=Y_repl_train,d=D_binary_repl_train,X_repl_train)
+# Initiate earners
+lgr::get_logger("mlr3")$set_threshold("warn")
+learner=lrn(eval_metric="logloss","classif.xgboost")
+ml_m = learner$clone()
+learner=lrn(objective ='reg:squarederror',"regr.xgboost")
+ml_g = learner$clone()
+
+# Estimate DML without controls
+obj_dml = DoubleMLPLR$new(dml_data_nocontrols, ml_g=ml_g, ml_m=ml_m)
+obj_dml$fit()
+print("------------- No controls ------------- ")
+print(obj_dml)
+
+# Estimate DML with controls
+obj_dml = DoubleMLPLR$new(dml_data_controls, ml_g=ml_g, ml_m=ml_m)
+obj_dml$fit()
+cat("\n\n\n")
+print("------------- With controls ------------- ")
+print(obj_dml)
+```
+
+
+
+
+
+
+## Multiarm treatment
+
+
+
+
+```{r dml_multiarm,hide=FALSE}
+
+print("------------- No controls ------------- ")
+cfnocontrols <- multi_arm_causal_forest(X=X_sel_train_nocontrols, Y=Y_sel_train, W=D_sel_train)
+average_treatment_effect(cfnocontrols)
+
+cat("\n\n\n")
+print("------------- With controls ------------- ")
+cfcontrols <- multi_arm_causal_forest(X=X_repl_train, Y=Y_repl_train, W=D_repl_train)
+average_treatment_effect(cfcontrols)
+```
+# Causal Forest
+
+## Binary treatment
+
+### Non-selected
+
+```{r cf_binary_sel,hide=FALSE}
+
+cfbinary<- causal_forest(X=X_repl_train, Y=Y_repl_train, W=D_binary_repl_train,tune.parameters = "all")
+average_treatment_effect(cfbinary)
+```
+
+### Selected sample (causal)
+
+```{r cf_binary_causal,hide=FALSE}
+
+cfbinary<- causal_forest(X=X_sel_train, Y=Y_sel_train, W=D_binary_sel_train,tune.parameters = "all")
+average_treatment_effect(cfbinary)
+```
+
+
+### Parameter settings
+
+```{r tuning_parameters_binary,}
+cfbinary$tuning.output               
+
+```
+### Regression forests
+
+```{r regfrest,hide=FALSE}
+Y.regforest = regression_forest(X_sel_train, Y_sel_train)
+D.regforest = regression_forest(X_sel_train, D_binary_sel_train)
+```
+
+### Comparison to OLS
+
+Below I estimate the basic OLS
+```{r olsen,hide=FALSE}
+# Fit OLS
+olsY<-lm(death~.,data=df_sel_train%>%select(-D,-Dbinary))
+olsD<-lm(Dbinary~.,data=df_sel_train%>%select(-death,-D))
+# Print
+print("---- OLS for Y ----")
+summary(olsY)
+
+print("---- OLS for D ----")
+summary(olsD)
+```
+
+Let us compare the out of sample performance
+
+```{r benchmark,hide=FALSE}
+# R-squared
+r2 <-function(preds,actual){ 
+  return(1- sum((preds - actual) ^ 2)/sum((actual - mean(actual))^2))
+}
+
+r2_olsY<-r2(predict(olsY,newdata=df_sel_test),df_sel_test$death)
+r2_olsD<-r2(predict(olsD,newdata=df_sel_test),df_sel_test$Dbinary)
+
+r2_rfY<-r2(predict(Y.regforest,newdata=X_sel_test)$predictions,df_sel_test$death)
+r2_rfD<-r2(predict(D.regforest,newdata=X_sel_test)$predictions,df_sel_test$Dbinary)
+
+data.frame(Method=c("OLS","RF"),R2_D=c(r2_olsD,r2_rfD),R2_Y=c(r2_olsY,r2_rfY))
+```
+
+### Propensity scores
+
+
+
+```{r , }
+plotdata<-data.frame(what=cfbinary$W.hat)
+ggplot(plotdata,aes(x=what))+geom_histogram(bins=100,fill="#f56c42",color="white")+xlim(0,1)+
+  theme_minimal()
+```
+### Diagnostic tests
+
+```{r diag_testw, }
+test_calibration(cfbinary)
+```
+
+### Influential features
+
+```{r infuential}
+
+# Get importance
+importance=variable_importance(cfbinary)
+
+var_imp <- data.frame(importance=importance,names=colnames(X_sel_train))
+ggplot(var_imp,aes(x= reorder(names,importance),y=importance))+
+  geom_bar(stat="identity",fill="#f56c42",color="white")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle=45,vjust = 1, hjust=1))+
+  labs(x=" ")+
+  coord_flip()
+
+```
+### Characterising treatment effect heterogeneity
+
+CATE distribution
+
+
+```{r cates_binary,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.95, position = "identity",
+                  fill="#f56c42",color="white")+
+  theme_minimal()+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density")
+
+```
+Plot quartiles 
+```{r create_quintiles }
+# Split sample in 5 groups based on cates
+df_sel_train["categroup"] <- factor(ntile(predict(cfbinary)$predictions, n=4))
+# calculate AIPW for each sub group
+estimated_aipw_ate <- lapply(
+  seq(4), function(w) {
+  ate <- average_treatment_effect(cfbinary, subset = df_sel_train$categroup == w,method = "AIPW")
+})
+# Combine in data da frame
+estimated_aipw_ate <- data.frame(do.call(rbind, estimated_aipw_ate))
+estimated_aipw_ate$Ntile <- as.numeric(rownames(estimated_aipw_ate))
+
+# create plot
+ggplot(estimated_aipw_ate) +
+  geom_pointrange(aes(x = Ntile, y = estimate, ymax = estimate + 1.96 * `std.err`, ymin = estimate - 1.96 * `std.err`), 
+                  size = 1,
+                  position = position_dodge(width = .5)) +
+  theme_minimal() +
+  geom_hline(yintercept=0,linetype="dashed")+
+  labs(x = "Quartile", y = "AIPW ATE", title = "AIPW ATEs by  quartiles of the conditional average treatment effect")
+
+```
+```{r quartiles,hide=FALSE}
+
+
+# create table
+datasummary_balance(~categroup,
+                    data = sumstatdata<-df_sel_train%>%filter(categroup%in%c(1,4))%>%select(-D),
+                    title = "Comparison of the first vs fourth quartile",
+                    fmt= '%.3f',
+                    dinm_statistic = "p.value")
+```
+
+Now by covariates
+
+```{r cate_plots,hide=FALSE}
+df_sel_train["tau"]<-predict(cfbinary)$predictions
+df_sel_train_col<-df_sel_train%>%
+  group_by(modelyr,splmU55)%>%
+  summarise(tau=mean(tau))
+p1<-ggplot(df_sel_train_col,aes(x=modelyr,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)
+df_sel_train_col<-df_sel_train%>%
+  group_by(year,splmU55)%>%
+  summarise(tau=mean(tau))
+p2<-ggplot(df_sel_train_col,aes(x=year,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)+labs(y="")
+df_sel_train_col<-df_sel_train%>%
+  group_by(thoulbs_I)%>%
+  summarise(tau=mean(tau))
+p3<-ggplot(df_sel_train_col,aes(x=thoulbs_I*1000,y=tau))+geom_point()+
+  ylim(-0.125,0)+labs(y="")
+ggarrange(p1, p2, p3, ncol=3, nrow=1, common.legend = TRUE, legend="bottom")
+```
+
+CATE distribution by speed limit
+
+
+```{r cates_binary_by_limit,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",splmU55=df_sel_train$splmU55,tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau,fill=as.factor(splmU55),group=splmU55))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.5, position = "identity",
+                 color="white")+
+  theme_minimal()+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density")
+
+```
+
+## Multiarm treatment
+
+### First I reload data
+
+```{r manipulate_data_multiarm}
+# load full dataset
+
+df_repl<-read_delim("../data/FARS-data-full-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# load small dataset
+df_sel<-read_delim("../data/FARS-data-selection-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# remove rows with missing cases
+df_repl<-df_repl[complete.cases(df_repl), ]
+df_sel<-df_sel[complete.cases(df_sel), ]
+
+
+
+# Treatment indicators
+df_repl<-df_repl%>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                      childseat==1~"Childseat",TRUE~"NONE"),
+                          D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                          Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+df_sel <-df_sel %>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                    childseat==1~"Childseat",TRUE~"NONE"),
+                         D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                         Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+# Convert categorical to indicators
+df_repl<-dummy_cols(df_repl%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm)
+df_sel<-dummy_cols(df_sel%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm)
+#df_repl<-df_repl%>%mutate(day=ifelse(crashtm=="1_day",1,0),night=ifelse(crashtm=="2_night",1,0),morn=ifelse(crashtm=="3_morn",1,0))
+#df_sel<- df_sel %>%mutate(day=ifelse(crashtm=="1_day",1,0),night=ifelse(crashtm=="2_night",1,0),morn=ifelse(crashtm=="3_morn",1,0))
+# Select variables
+#df_repl<-df_repl%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death,D,Dbinary)
+#df_sel<- df_sel %>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death,D,Dbinary)
+
+# Training and test data
+set.seed(seed)
+df_repl_split <- initial_split(df_repl, prop = .5)
+df_repl_train <- training(df_repl_split)
+df_repl_test  <- testing(df_repl_split)
+df_sel_split <- initial_split(df_sel, prop = .5)
+df_sel_train <- training(df_sel_split)
+df_sel_test  <- testing(df_sel_split)
+# X Matrices
+X_repl_train<-as.matrix(df_repl_train%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv))
+X_repl_test<- as.matrix(df_repl_test%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv))
+X_sel_train<- as.matrix(df_sel_train%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv))
+X_sel_test<-  as.matrix(df_sel_test%>%select(splmU55,thoulbs_I,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv))
+X_repl_train_nocontrols<-as.matrix(rep(1,nrow(X_repl_train)))
+X_repl_test_nocontrols<- as.matrix(rep(1,nrow(X_repl_test)))
+X_sel_train_nocontrols<- as.matrix(rep(1,nrow(X_sel_train)))
+X_sel_test_nocontrols<-  as.matrix(rep(1,nrow(X_sel_test)))
+# D matrices
+D_repl_train<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_repl_test<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_train<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_test<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_binary_repl_train<-as.matrix(df_repl_train%>%select(Dbinary))
+D_binary_repl_test<- as.matrix(df_repl_test%>%select(Dbinary))
+D_binary_sel_train<- as.matrix(df_sel_train%>%select(Dbinary))
+D_binary_sel_test<-  as.matrix(df_sel_test%>%select(Dbinary))
+# Y matrices
+Y_repl_train<-as.matrix(df_repl_train%>%select(death))
+Y_repl_test<- as.matrix(df_repl_test%>%select(death))
+Y_sel_train<- as.matrix(df_sel_train%>%select(death))
+Y_sel_test<-  as.matrix(df_sel_test%>%select(death))
+  
+
+```
+
+
+### Then get the forest
+
+```{r cf_binary,hide=FALSE}
+cfmulti <- multi_arm_causal_forest(X=X_sel_train, Y=Y_sel_train, W=D_sel_train)
+average_treatment_effect(cfmulti)
+```
+
+### Propensity scores
+
+
+
+### Influential features
+
+```{r infuentialmulti}
+
+# Get importance
+importance=variable_importance(cfmulti)
+
+var_imp <- data.frame(importance=importance,names=colnames(X_sel_train))
+ggplot(var_imp,aes(x= reorder(names,importance),y=importance))+
+  geom_bar(stat="identity",fill="#f56c42",color="white")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle=45,vjust = 1, hjust=1))+
+  labs(x=" ")+
+  coord_flip()
+
+```
+### Characterising treatment effect heterogeneity
+
+CATE distribution
+
+
+
+```{r cate_multi, echo=FALSE}
+tauhat <- predict(cfmulti)$predictions[,,]
+df_1<-data.frame(tauhat=tauhat[,"Lapbelt - NONE"],type="Lapbelt - NONE")
+df_2<-data.frame(tauhat=tauhat[,"LapShoulderSeat - NONE"],type="LapShoulderSeat - NONE")
+df_3<-data.frame(tauhat=tauhat[,"Childseat - NONE"],type="Childseat - NONE")
+df_chart<-rbind(df_1,df_2,df_3)
+
+ggplot(df_chart,aes(x=tauhat))+  
+   geom_histogram(aes(x = tauhat, y = ..density..),
+                  color="white",fill="#3aab54",bins=50) +
+   facet_wrap(~type,ncol=1)+
+   theme_minimal()+
+   labs(fill="",color="")+
+  theme(legend.position = "none")
+```
+
+
+Now by covariates
+
+```{r , echo=FALSE}
+tauhat <- predict(cfmulti)$predictions[,,]
+df_1<-data.frame(tauhat=tauhat[,"Lapbelt - NONE"],type="Lapbelt - NONE",modelyr=df_sel_train$modelyr,year=df_sel_train$year,weight=df_sel_train$thoulbs_I)
+df_2<-data.frame(tauhat=tauhat[,"LapShoulderSeat - NONE"],type="LapShoulderSeat - NONE",modelyr=df_sel_train$modelyr,year=df_sel_train$year,weight=df_sel_train$thoulbs_I)
+df_3<-data.frame(tauhat=tauhat[,"Childseat - NONE"],type="Childseat - NONE",modelyr=df_sel_train$modelyr,year=df_sel_train$year,weight=df_sel_train$thoulbs_I)
+df_chart<-rbind(df_1,df_2,df_3)%>%
+  group_by(year,type)%>%summarise(tauhat=mean(tauhat))
+
+p1<-ggplot(df_chart,aes(x=year,y=tauhat,fill=type,color=type))+
+  geom_point(size=2)+
+   theme_minimal()+
+   labs(fill="",color="")+
+  theme(legend.position = "none")
+
+df_chart<-rbind(df_1,df_2,df_3)%>%
+  group_by(modelyr,type)%>%summarise(tauhat=mean(tauhat))
+
+p2<-ggplot(df_chart,aes(x=modelyr,y=tauhat,fill=type,color=type))+
+  geom_point(size=2)+
+   theme_minimal()+
+   labs(fill="",color="",y="")+
+  theme(legend.position = "top")
+
+df_chart<-rbind(df_1,df_2,df_3)%>%
+  group_by(weight,type)%>%summarise(tauhat=mean(tauhat))
+
+p3<-ggplot(df_chart,aes(x=weight,y=tauhat,fill=type,color=type))+
+  geom_point(size=2)+
+   theme_minimal()+
+   labs(fill="",color="",y="")+
+  theme(legend.position = "top")
+
+p1+p2+p3
+```
+
+# Policy Learning
+
+## Single treatment
+
+```{r , echo=FALSE}
+
+Gamma.matrix <- double_robust_scores(cfbinary)
+opt.tree <- policy_tree(X_sel_train,Gamma.matrix, depth = 2)
+opt.tree
+
+```
+
+```{r , echo=FALSE}
+
+plot(opt.tree)
+```
+
+
+## Multiarm
+
+```{r , echo=FALSE}
+
+Gamma.matrix <- double_robust_scores(cfmulti)
+opt.tree <- policy_tree(X_sel_train,Gamma.matrix, depth = 2)
+opt.tree
+```
+
+```{r , echo=FALSE}
+
+
+plot(opt.tree)
+```
+
