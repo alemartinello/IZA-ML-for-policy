@@ -1,0 +1,873 @@
+---
+title: "empirical_example_in_R"
+date: "Version: October 15 , 2021"
+output:
+    html_document:
+      toc: true
+      theme: united
+      toc_float: true
+      number_sections: true 
+---
+  
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message = FALSE,warning=FALSE)
+```
+
+
+# Preparations
+
+ 
+
+## Notation
+
+We  use the following notation for the datasets in use. Note, however, that some of the functions were are going to use, use $W$ as the treatment indictor. ,
+
+- $D$ Treatment indicator (binary or multiarm)
+- $y$ outcome
+- $X$ features/controls
+
+
+## Seed
+
+We clear the working directory (not strictly necessary) and specify the seed. Note that we will also set the seed before calling some functions such as the `causal_forest()` to ensure replicability. 
+
+```{r seed}
+rm(list=ls())
+seed<-1909
+set.seed(seed)
+```
+## Libraries
+
+Below we load the libraries that were going to use.
+
+```{r libraries}
+# loading & modifying data
+library("readr")         # to read the data
+library("dplyr")         # to manipulate data
+library("fastDummies")   # create dummies
+# charts & tables
+library("ggplot2")       # to create charts
+library("patchwork")     # to combine charts
+library("flextable")     # design tables
+library("modelsummary")  # structure tables
+library("kableExtra")    # design table
+library("estimatr")
+library("ggpubr")
+# regression & analysis
+library("fixest")        # high dimensional FE
+library("skimr")         # skim the data
+# machine learning
+library("policytree")    # policy tree (Athey & Wager, 2021)
+library("grf")           # causal forest
+library("rsample")       # data splitting 
+library("randomForest")  # Traditional Random Forests
+library("mlr3")          # learners
+library("mlr3learners")  # learners
+library("gbm")           # Generalized Boosted Regression
+library("DoubleML")      # Double ML
+```
+
+
+## Load and prepare data
+
+### Load data
+
+First we load the datasets and remove rows with missing values.
+
+```{r load_data}
+# load full dataset
+
+df_repl<-read_delim("../data/FARS-data-full-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# load small dataset
+df_sel<-read_delim("../data/FARS-data-selection-sample.txt",delim = "\t")%>%
+              filter(year<2004)%>%
+              select(-starts_with("imp"))
+# remove rows with missing cases
+df_repl<-df_repl[complete.cases(df_repl), ]
+df_sel<-df_sel[complete.cases(df_sel), ]
+
+# print number of obs
+print(paste('Number of observations in the data:',nrow(df_repl),' (full sample);',nrow(df_sel), ' (selected/causal sample)'))
+```
+
+
+
+### Manipulate data
+
+The following block prepares the data. It is bigger than it needs to be and creates several data frames and matrices that we are not using currently, but that we might use at some point.
+
+```{r manipulate_data}
+# Treatment indicators
+df_repl<-df_repl%>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                      childseat==1~"Childseat",TRUE~"NONE"),
+                          D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                          Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+df_sel <-df_sel %>%mutate(D=case_when(lapshould==1~"LapShoulderSeat",lapbelt==1~"Lapbelt",
+                                    childseat==1~"Childseat",TRUE~"NONE"),
+                         D=factor(D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat")),
+                         Dbinary=case_when(lapshould==1~1,lapbelt==1~1,childseat==1~1,TRUE~0))
+# Convert categorical to indicators
+df_repl<-dummy_cols(df_repl%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm,-crashcar,-age,-vehicles1,-vehicles2)
+df_sel<-dummy_cols(df_sel%>%select(-restraint))%>%select(-starts_with("D_"),-crashtm,-crashcar,-age,-vehicles1,-vehicles2)
+# Training and test data
+set.seed(seed)
+df_repl_split <- initial_split(df_repl, prop = .5)
+df_repl_train <- training(df_repl_split)
+df_repl_test  <- testing(df_repl_split)
+df_sel_split <- initial_split(df_sel, prop = .5)
+df_sel_train <- training(df_sel_split)
+df_sel_test  <- testing(df_sel_split)
+# X Matrices
+X_repl_train<-as.matrix(df_repl_train%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_repl_test<- as.matrix(df_repl_test%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_repl<- as.matrix(df_repl%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_sel_train<- as.matrix(df_sel_train%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_sel_test<-  as.matrix(df_sel_test%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_sel<-  as.matrix(df_sel%>%select(-death,-D,-Dbinary,-childseat,-lapbelt,-lapshould))
+X_repl_train_nocontrols<-as.matrix(rep(1,nrow(X_repl_train)))
+X_repl_test_nocontrols<- as.matrix(rep(1,nrow(X_repl_test)))
+X_repl_nocontrols<-as.matrix(rep(1,nrow(X_repl)))
+X_sel_train_nocontrols<- as.matrix(rep(1,nrow(X_sel_train)))
+X_sel_test_nocontrols<-  as.matrix(rep(1,nrow(X_sel_test)))
+X_sel_nocontrols<-as.matrix(rep(1,nrow(X_sel)))
+# D matrices
+D_repl_train<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_repl_test<-factor(df_repl_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_repl<-factor(df_repl$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_train<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel_test<-factor(df_sel_train$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_sel<-factor(df_sel$D,levels=c("NONE","Lapbelt","LapShoulderSeat","Childseat"))
+D_binary_repl_train<-as.matrix(df_repl_train%>%select(Dbinary))
+D_binary_repl_test<- as.matrix(df_repl_test%>%select(Dbinary))
+D_binary_repl<- as.matrix(df_repl%>%select(Dbinary))
+D_binary_sel_train<- as.matrix(df_sel_train%>%select(Dbinary))
+D_binary_sel_test<-  as.matrix(df_sel_test%>%select(Dbinary))
+D_binary_sel<-  as.matrix(df_sel%>%select(Dbinary))
+# Y matrices
+Y_repl_train<-as.matrix(df_repl_train%>%select(death))
+Y_repl_test<- as.matrix(df_repl_test%>%select(death))
+Y_repl<- as.matrix(df_repl%>%select(death))
+Y_sel_train<- as.matrix(df_sel_train%>%select(death))
+Y_sel_test<-  as.matrix(df_sel_test%>%select(death))
+Y_sel<-  as.matrix(df_sel%>%select(death))
+  
+
+```
+
+## Summary statistics
+
+Let's calculate some summary statistics on the datasets. This is mostly done to make Alessandro jealous of the built-in stuff in R. However,a s many variables  are binary it doesn't make much sense to show the histograms.
+
+```{r summary_statistics, out.width=20}
+tmp <- df_sel%>%select(splmU55,thoulbs_I,modelyr,year,numcrash,weekend,lowviol,highviol,ruralrd,frimp,suv,death)
+# remove missing and rescale
+tmp_list <- lapply(tmp, na.omit)
+tmp_list <- lapply(tmp_list, scale)
+
+emptycol = function(x) " "
+datasummary(splmU55+thoulbs_I+modelyr+year+numcrash+weekend+lowviol+highviol+ruralrd+frimp+suv+death ~ Mean + SD + 
+              Heading("Boxplot") * emptycol + Heading("Histogram") * emptycol, data = tmp) %>%
+    column_spec(column = 4, image = spec_boxplot(tmp_list)) %>%
+    column_spec(column = 5, image = spec_hist(tmp_list))
+
+
+```
+
+
+
+
+# Causal Forest out of the box
+
+
+We first estimate a causal forest where we, more or less, use all default settings.
+
+## Estimate Forest
+
+In the block below we estimate teh causal forest. With `tune.parameters = "all"` we ask R to find the optimal parameter settings using cross-validation (tuning) on 50 forests with 200 trees. The AIPW ATE is -0.043 (0.007). Note that we get the warning that propensity scores are between 0.032 and 0.99.
+
+
+
+```{r ,hide=FALSE}
+
+cfbinary<- causal_forest(X=X_sel,Y=Y_sel, W=D_binary_sel,tune.parameters = "all")
+average_treatment_effect(cfbinary)
+```
+
+## Tuned parameter settings
+
+As the block below shows, the tuning did not lead to parameter settings that differ from the default. We will return to that later, but it is wort noting that the minimum node (and thereby leaf) size is 5 which can therefore implies that the leafs can be quite small and we should worry about over fitting.
+
+```{r tuning_parameters_binary,}
+cfbinary$tuning.output               
+
+```
+
+## Plot tree
+
+In the block below we plot one of the trees. This is not super helpful because it becomes so big that we can't read it. However, it does give some suggestion on shallowness which we cannot set here. We observe that the tree is quite deep.
+
+
+```{r cf_illustration,fig.show="hold", fig.cap='Causal Tree Illustration', out.width="100%", fig.align = "center"}
+# Extract the first tree
+treeex1<-get_tree(cfbinary,1)
+# Plot the tree
+plot(treeex1)
+
+```
+
+## Omnibus test
+
+Next we run the the diagnostic test by runing a regression of the cate on the mean and the predicted deviation. If the forest captures the mean and the heterogeneity well, both coefficients should be 1. We are not far off!
+
+```{r , }
+test_calibration(cfbinary)
+```
+
+## Influential features
+
+Below we plot the features by how often they were used to create a split. The speed limit is often chosen, followed by weight.
+
+```{r }
+
+# Get importance
+importance=variable_importance(cfbinary)
+
+var_imp <- data.frame(importance=importance,names=colnames(X_sel_train))
+ggplot(var_imp,aes(x= reorder(names,importance),y=importance))+
+  geom_bar(stat="identity",fill="#f56c42",color="white")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle=45,vjust = 1, hjust=1))+
+  labs(x=" ")+
+  coord_flip()
+
+```
+
+## Cate distribution
+
+Below we show the distribution of the CATEs.
+
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.95, position = "identity",
+                  fill="#f56c42",color="white",size=.2)+
+  theme_minimal()+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density")
+
+```
+
+
+
+
+## Plot quartiles of CATEs
+
+We now split the sample in four quartiles according to the size of the CATEs.
+```{r  }
+# Split sample in 5 groups based on cates
+df_sel["categroup"] <- factor(ntile(predict(cfbinary)$predictions, n=4))
+# calculate AIPW for each sub group
+estimated_aipw_ate <- lapply(
+  seq(4), function(w) {
+  ate <- average_treatment_effect(cfbinary, subset = df_sel$categroup == w,method = "AIPW")
+})
+# Combine in data da frame
+estimated_aipw_ate <- data.frame(do.call(rbind, estimated_aipw_ate))
+estimated_aipw_ate$Ntile <- as.numeric(rownames(estimated_aipw_ate))
+estimated_aipw_ate$type<-"AIPW"
+# Mean of CATES
+df_sel["cate"]<-predict(cfbinary)$predictions
+cates<-df_sel%>%group_by(categroup)%>%summarise(estimate=mean(cate))%>%rename(Ntile=categroup)%>%mutate(std.err=NA,type="CATE")
+
+dfplot<-rbind(estimated_aipw_ate,cates)
+# create plot
+ggplot(dfplot,aes(color=type)) +
+  geom_pointrange(aes(x = Ntile, y = estimate, ymax = estimate + 1.96 * `std.err`, ymin = estimate - 1.96 * `std.err`), 
+                  size = 1,
+                  position = position_dodge(width = .5)) +
+  theme_minimal() +theme(legend.position = "top")+
+  geom_hline(yintercept=0,linetype="dashed")+
+  labs(color="",x = "Quartile", y = "AIPW ATE", title = "AIPW ATEs by  quartiles of the conditional average treatment effect")
+
+```
+
+Below we compare the characteristics of the first and fourth quartile above. 
+
+```{r ,hide=FALSE}
+
+
+# create table
+datasummary_balance(~categroup,
+                    data = sumstatdata<-df_sel%>%filter(categroup%in%c(1,4))%>%
+                      mutate(categroup=ifelse(categroup==1,1,4))%>%select(-D),
+                    title = "Comparison of the first vs fourth quartile",
+                    fmt= '%.3f',
+                    dinm_statistic = "p.value")
+
+```
+
+
+## Mean CATEs  by covariates
+
+Below we plot the average CATE by speed limit and weight.
+
+```{r ,hide=FALSE}
+df_sel["tau"]<-predict(cfbinary)$predictions
+df_sel_train_col<-df_sel%>%
+  group_by(modelyr,splmU55)%>%
+  summarise(tau=mean(tau))
+p1<-ggplot(df_sel_train_col,aes(x=modelyr,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)+theme_classic()
+df_sel_train_col<-df_sel%>%
+  group_by(year,splmU55)%>%
+  summarise(tau=mean(tau))
+p2<-ggplot(df_sel_train_col,aes(x=year,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)+labs(y="")+theme_classic()+theme(axis.text.y=element_blank())
+df_sel_train_col<-df_sel
+df_sel_train_col["xtile"] <- ntile(as.numeric(df_sel_train_col$thoulbs_I), n=50)
+df_sel_train_col<-df_sel_train_col%>%
+  group_by(xtile)%>%
+  summarise(thoulbs_I=mean(thoulbs_I),tau=mean(tau))%>%filter(thoulbs_I!=0)
+p3<-ggplot(df_sel_train_col,aes(x=thoulbs_I,y=tau))+geom_point()+
+  ylim(-0.125,0)+labs(y="")+theme_classic()+theme(axis.text.y=element_blank())
+ggarrange(p1, p2, p3, ncol=3, nrow=1, common.legend = TRUE, legend="bottom")
+```
+
+
+## CATE distribution by speed limit
+
+And finally we plot the distribution of the CATEs by speed limit.
+
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",splmU55=df_sel$splmU55,tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau,fill=as.factor(splmU55),group=splmU55))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.75, position = "identity",
+                 color="white",size=0.1)+
+  theme_minimal()+theme(legend.position="top")+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density", fill="splmU55")
+
+```
+
+
+
+
+## Policy learning
+
+Now to policy learning. We want to find the optimal policy. However, given that the predicted CATEs are positive for almost everyone it is expected that the unconditional optimal policy is close to treating everyone.
+
+### Features to consider
+
+We only select a subset of features to base our policy on. We will for example not consider the type of accident because it doesn't seem sensible to create a policy saying that you should have seatbelts if you were going to have a specific type of accident.
+
+```{r , echo=FALSE}
+
+X_pol<-as.matrix(as.data.frame(X_sel)%>%select(-year,-indrearimp,-rearimp,-indfrimp,-frimp,-rsimp,-lsimp))
+colnames(X_pol)
+```
+
+
+### Doubly robust scores 
+
+Next we compute the doubly robust scores. These scores are used to feed into the algorithm.
+
+```{r , echo=FALSE}
+#Gamma.matrix <- double_robust_scores(cfbinary)
+tauhat<- predict(cfbinary)$predictions
+Gamma.dr = tauhat +D_binary_sel / cfbinary$W.hat * 
+     (Y_sel - cfbinary$Y.hat - (1 - cfbinary$W.hat) * tauhat) -  (1 - D_binary_sel) / (1 - cfbinary$W.hat) * (Y_sel - cfbinary$Y.hat + cfbinary$W.hat * tauhat)
+
+Gamma.matrix<-as.matrix(cbind(0,-Gamma.dr))
+```
+
+
+
+### Find optimal policy
+
+We now feed the scores to the algorithm that maximizes the difference between treating those directed by the features vs treating a random sample of the population. We set the depth to 2, meaning that the complexity of the policy is rather limited. 
+
+```{r , echo=FALSE}
+
+
+opt.tree <- policy_tree(X_pol,Gamma.matrix, depth = 2)
+opt.tree
+
+```
+
+
+### Plot optimal policy
+
+Below we simply plot the policy. Action 2 is treating. Action 1 is not treating.
+
+```{r , echo=FALSE}
+
+plot(opt.tree)
+```
+
+### Fraction treated
+
+How many are treated?
+
+```{r ,hide=FALSE}
+
+df_sel["policy"]<-predict(opt.tree, df_sel%>%select(colnames(X_pol)))
+df_sel<-df_sel%>%mutate(policy=policy-1)
+mean(df_sel$policy)
+  
+```
+
+We observe that almost everyone is treated, as expected.
+
+
+### Advantage of policy
+
+What is the benefit for those treated compared to those not treated?
+
+
+```{r ,hide=FALSE}
+
+get_advantage = function(policy) {
+    benefits<-( policy ) *Gamma.dr
+
+    # Treated
+    ATT = mean(Gamma.dr[policy==1])
+    ATTse = sqrt(var(Gamma.dr[policy==1]) / length(Gamma.dr[policy==1]))
+    # Untreated
+    ATU = mean(Gamma.dr[policy==0])
+    ATUse = sqrt(var(Gamma.dr[policy==0]) / length(Gamma.dr[policy==0]))
+    # output
+    c(att=ATT,attse=ATTse,atu=ATU,atuse=ATUse)
+}
+
+get_advantage(df_sel$policy)
+  
+```
+
+
+
+## Policy learning with a cost
+
+We observe above that we treated basically everyone, as expected. But that also assumed that the policy was free. What if it was costly? We incldue a cost by simply reducing the benefit of treatment. 
+
+### Doubly robust scores with costs
+
+We add a cost corresponding to reducing the benefit by 0.04, which corresponds to a pretty high cost.
+
+```{r , echo=FALSE}
+#Gamma.matrix <- double_robust_scores(cfbinary)
+tauhat<- predict(cfbinary)$predictions
+Gamma.dr = tauhat +D_binary_sel / cfbinary$W.hat * 
+     (Y_sel - cfbinary$Y.hat - (1 - cfbinary$W.hat) * tauhat) -  (1 - D_binary_sel) / (1 - cfbinary$W.hat) * (Y_sel - cfbinary$Y.hat + cfbinary$W.hat * tauhat)
+
+Gamma.matrix<-as.matrix(cbind(0,-(Gamma.dr+0.04)))
+```
+
+
+### Find optimal policy
+
+We now feed the scores to the algorithm that maximizes the difference between treating those directed by the features vs treating a random sample of the population. We set the depth to 2, meaning that the complexity of the policy is rather limited. 
+
+```{r , echo=FALSE}
+
+
+opt.tree <- policy_tree(X_pol,Gamma.matrix, depth = 2)
+opt.tree
+
+```
+
+
+### Plot optimal policy
+
+Below we simply plot the policy. Action 2 is treating. Action 1 is not treating.
+
+```{r , echo=FALSE}
+
+plot(opt.tree)
+```
+
+### Fraction treated
+
+
+```{r ,hide=FALSE}
+
+df_sel["policy"]<-predict(opt.tree, df_sel%>%select(colnames(X_pol)))
+df_sel<-df_sel%>%mutate(policy=policy-1)
+mean(df_sel$policy)
+  
+```
+
+We now only treat half of the sample!
+
+### Advantage of policy
+
+
+
+```{r ,hide=FALSE}
+
+get_advantage(df_sel$policy)
+  
+```
+
+And those that we treat now benefit a lot. But those that we don't treat would also benefit somewhat.
+
+
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",treated=df_sel$policy,tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau,fill=as.factor(treated),group=treated))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.75, position = "identity",
+                 color="white",size=0.1)+
+  theme_minimal()+theme(legend.position="top")+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density", fill="Treated")
+
+```
+
+
+
+
+
+
+# CF with adhoc settings
+
+
+## Forest with ad hoc settings
+
+We set the minimum node size 50 to avoid overfitting.
+
+```{r ,hide=FALSE}
+
+cfbinary<- causal_forest(X=X_sel,Y=Y_sel, W=D_binary_sel,min.node.size=50)
+average_treatment_effect(cfbinary)
+```
+
+
+
+## Plot tree
+
+We can get an indication on how increasing the minimum node size from 5 to 50 reduced the complexity of the tree consdierably.
+
+
+```{r ,fig.show="hold", fig.cap='Causal Tree Illustration', out.width="100%", fig.align = "center"}
+# Extract the first tree
+treeex1<-get_tree(cfbinary,1)
+# Plot the tree
+plot(treeex1)
+
+```
+
+## Omnibus test
+
+The omnibus test is still pretty good. 
+
+```{r , }
+test_calibration(cfbinary)
+```
+
+## Influential features
+
+The speed limit is still number 1...
+
+```{r }
+
+# Get importance
+importance=variable_importance(cfbinary)
+
+var_imp <- data.frame(importance=importance,names=colnames(X_sel_train))
+ggplot(var_imp,aes(x= reorder(names,importance),y=importance))+
+  geom_bar(stat="identity",fill="#f56c42",color="white")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle=45,vjust = 1, hjust=1))+
+  labs(x=" ")+
+  coord_flip()
+
+```
+
+## Cate distribution
+
+The CATE distribution is slightly different.
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.95, position = "identity",
+                  fill="#f56c42",color="white",size=.2)+
+  theme_minimal()+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density")
+
+```
+
+
+
+
+## Plot quartiles of CATEs
+
+
+```{r  }
+# Split sample in 5 groups based on cates
+df_sel["categroup"] <- factor(ntile(predict(cfbinary)$predictions, n=4))
+# calculate AIPW for each sub group
+estimated_aipw_ate <- lapply(
+  seq(4), function(w) {
+  ate <- average_treatment_effect(cfbinary, subset = df_sel$categroup == w,method = "AIPW")
+})
+# Combine in data da frame
+estimated_aipw_ate <- data.frame(do.call(rbind, estimated_aipw_ate))
+estimated_aipw_ate$Ntile <- as.numeric(rownames(estimated_aipw_ate))
+estimated_aipw_ate$type<-"AIPW"
+# Mean of CATES
+df_sel["cate"]<-predict(cfbinary)$predictions
+cates<-df_sel%>%group_by(categroup)%>%summarise(estimate=mean(cate))%>%rename(Ntile=categroup)%>%mutate(std.err=NA,type="CATE")
+
+dfplot<-rbind(estimated_aipw_ate,cates)
+# create plot
+ggplot(dfplot,aes(color=type)) +
+  geom_pointrange(aes(x = Ntile, y = estimate, ymax = estimate + 1.96 * `std.err`, ymin = estimate - 1.96 * `std.err`), 
+                  size = 1,
+                  position = position_dodge(width = .5)) +
+  theme_minimal() +theme(legend.position = "top")+
+  geom_hline(yintercept=0,linetype="dashed")+
+  labs(color="",x = "Quartile", y = "AIPW ATE", title = "AIPW ATEs by  quartiles of the conditional average treatment effect")
+
+```
+
+
+
+```{r ,hide=FALSE}
+
+
+# create table
+datasummary_balance(~categroup,
+                    data = sumstatdata<-df_sel%>%filter(categroup%in%c(1,4))%>%
+                      mutate(categroup=ifelse(categroup==1,1,4))%>%select(-D),
+                    title = "Comparison of the first vs fourth quartile",
+                    fmt= '%.3f',
+                    dinm_statistic = "p.value")
+
+```
+
+
+## Mean CATEs  by covariates
+
+
+```{r ,hide=FALSE}
+df_sel["tau"]<-predict(cfbinary)$predictions
+df_sel_train_col<-df_sel%>%
+  group_by(modelyr,splmU55)%>%
+  summarise(tau=mean(tau))
+p1<-ggplot(df_sel_train_col,aes(x=modelyr,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)+theme_classic()
+df_sel_train_col<-df_sel%>%
+  group_by(year,splmU55)%>%
+  summarise(tau=mean(tau))
+p2<-ggplot(df_sel_train_col,aes(x=year,y=tau,color=as.factor(splmU55)))+geom_point()+
+  ylim(-0.125,0)+labs(y="")+theme_classic()+theme(axis.text.y=element_blank())
+df_sel_train_col<-df_sel
+df_sel_train_col["xtile"] <- ntile(as.numeric(df_sel_train_col$thoulbs_I), n=50)
+df_sel_train_col<-df_sel_train_col%>%
+  group_by(xtile)%>%
+  summarise(thoulbs_I=mean(thoulbs_I),tau=mean(tau))%>%filter(thoulbs_I!=0)
+p3<-ggplot(df_sel_train_col,aes(x=thoulbs_I,y=tau))+geom_point()+
+  ylim(-0.125,0)+labs(y="")+theme_classic()+theme(axis.text.y=element_blank())
+ggarrange(p1, p2, p3, ncol=3, nrow=1, common.legend = TRUE, legend="bottom")
+```
+
+
+## CATE distribution by speed limit
+
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",splmU55=df_sel$splmU55,tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau,fill=as.factor(splmU55),group=splmU55))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.75, position = "identity",
+                 color="white",size=0.1)+
+  theme_minimal()+theme(legend.position="top")+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density", fill="splmU55")
+
+```
+
+
+
+
+## Policy learning
+
+Now to policy learning. We want to find the optimal policy. However, given that the predicted CATEs are positive for almost everyone it is expected that the unconditional optimal policy is close to treating everyone.
+
+### Features to consider
+
+We only select a subset of features to base our policy on. We will for example not consider the type of accident because it doesn't seem sensible to create a policy saying that you should have seatbelts if you were going to have a specific type of accident.
+
+```{r , echo=FALSE}
+
+X_pol<-as.matrix(as.data.frame(X_sel)%>%select(-year,-indrearimp,-rearimp,-indfrimp,-frimp,-rsimp,-lsimp))
+colnames(X_pol)
+```
+
+
+### Doubly robust scores 
+
+Next we compute the doubly robust scores. These scores are used to feed into the algorithm.
+
+```{r , echo=FALSE}
+#Gamma.matrix <- double_robust_scores(cfbinary)
+tauhat<- predict(cfbinary)$predictions
+Gamma.dr = tauhat +D_binary_sel / cfbinary$W.hat * 
+     (Y_sel - cfbinary$Y.hat - (1 - cfbinary$W.hat) * tauhat) -  (1 - D_binary_sel) / (1 - cfbinary$W.hat) * (Y_sel - cfbinary$Y.hat + cfbinary$W.hat * tauhat)
+
+Gamma.matrix<-as.matrix(cbind(0,-Gamma.dr))
+```
+
+
+
+### Find optimal policy
+
+We now feed the scores to the algorithm that maximizes the difference between treating those directed by the features vs treating a random sample of the population. We set the depth to 2, meaning that the complexity of the policy is rather limited. 
+
+```{r , echo=FALSE}
+
+
+opt.tree <- policy_tree(X_pol,Gamma.matrix, depth = 2)
+opt.tree
+
+```
+
+
+### Plot optimal policy
+
+
+
+```{r , echo=FALSE}
+
+plot(opt.tree)
+```
+
+### Fraction treated
+
+How many are treated?
+
+```{r ,hide=FALSE}
+
+df_sel["policy"]<-predict(opt.tree, df_sel%>%select(colnames(X_pol)))
+df_sel<-df_sel%>%mutate(policy=policy-1)
+mean(df_sel$policy)
+  
+```
+
+We observe that almost everyone is treated, as expected.
+
+
+### Advantage of policy
+
+What is the benefit for those treated compared to those not treated?
+
+
+```{r ,hide=FALSE}
+
+get_advantage = function(policy) {
+    benefits<-( policy ) *Gamma.dr
+
+    # Treated
+    ATT = mean(Gamma.dr[policy==1])
+    ATTse = sqrt(var(Gamma.dr[policy==1]) / length(Gamma.dr[policy==1]))
+    # Untreated
+    ATU = mean(Gamma.dr[policy==0])
+    ATUse = sqrt(var(Gamma.dr[policy==0]) / length(Gamma.dr[policy==0]))
+    # output
+    c(att=ATT,attse=ATTse,atu=ATU,atuse=ATUse)
+}
+
+get_advantage(df_sel$policy)
+  
+```
+
+
+
+## Policy learning with a cost
+
+We observe above that we treated basically everyone, as expected. But that also assumed that the policy was free. What if it was costly? We incldue a cost by simply reducing the benefit of treatment. 
+
+### Doubly robust scores with costs
+
+We add a cost corresponding to reducing the benefit by 0.04, which corresponds to a pretty high cost.
+
+```{r , echo=FALSE}
+#Gamma.matrix <- double_robust_scores(cfbinary)
+tauhat<- predict(cfbinary)$predictions
+Gamma.dr = tauhat +D_binary_sel / cfbinary$W.hat * 
+     (Y_sel - cfbinary$Y.hat - (1 - cfbinary$W.hat) * tauhat) -  (1 - D_binary_sel) / (1 - cfbinary$W.hat) * (Y_sel - cfbinary$Y.hat + cfbinary$W.hat * tauhat)
+
+Gamma.matrix<-as.matrix(cbind(0,-(Gamma.dr+0.04)))
+```
+
+
+### Find optimal policy
+
+
+
+```{r , echo=FALSE}
+
+
+opt.tree <- policy_tree(X_pol,Gamma.matrix, depth = 2)
+opt.tree
+
+```
+
+
+### Plot optimal policy
+
+Below we simply plot the policy. Action 2 is treating. Action 1 is not treating.
+
+```{r , echo=FALSE}
+
+plot(opt.tree)
+```
+
+### Fraction treated
+
+
+```{r ,hide=FALSE}
+
+df_sel["policy"]<-predict(opt.tree, df_sel%>%select(colnames(X_pol)))
+df_sel<-df_sel%>%mutate(policy=policy-1)
+mean(df_sel$policy)
+  
+```
+
+We now only treat half of the sample!
+
+### Advantage of policy
+
+
+
+```{r ,hide=FALSE}
+
+get_advantage(df_sel$policy)
+  
+```
+
+And those that we treat now benefit a lot. But those that we don't treat would also benefit somewhat.
+
+
+```{r ,hide=FALSE}
+# get predictions
+cate<-data.frame(sample="CATEs",treated=df_sel$policy,tau=predict(cfbinary)$predictions)
+# histogram all
+ggplot(cate,aes(x=tau,fill=as.factor(treated),group=treated))+
+   geom_histogram(aes(y=..count../sum(..count..)),bins=100,alpha=0.75, position = "identity",
+                 color="white",size=0.1)+
+  theme_minimal()+theme(legend.position="top")+
+  labs(title=" ",x="Conditional Average Treatment Effect",y="Density", fill="Treated")
+
+```
+
+
+
+
