@@ -117,6 +117,50 @@ class OneHotPd(OneHotEncoder):
         )
 
 
+class SufficientRepresentation(BaseEstimator, TransformerMixin):
+    """
+    Class implementing the sufficient representation for categorical variables
+    approach proposed by Johannemann et al (2019):
+    (https://arxiv.org/abs/1908.09874)
+    """
+
+    def __init__(self, Gname, method='means', pd_output=True, prefix='fe'):
+        self.method = method
+        self.pd_output = pd_output
+        self.Gname = Gname
+        self.prefix = prefix
+
+    def fit(self, X, y=None):
+        if self.method == 'means':
+            pass
+        return self
+
+    def transform(self, X, y=None):
+        if self.method == 'means':
+            G = X[self.Gname]
+            C = X[[n for n in X.columns if n not in [self.Gname]]]
+            S = self._transform_means(G, C)
+
+        if self.pd_output:
+            S.columns = self._name_output(G, C)
+            return pd.concat([C, S], axis='columns')
+        else:
+            S = S.values
+            return np.hstack([C.values, S])
+
+        return S
+
+    def _transform_means(self, G, C):
+        means = pd.DataFrame(C).groupby(G).transform('mean')
+        return means
+
+    def _name_output(self, G, C):
+        if self.method == 'means':
+            return [f'{self.prefix}_{self.Gname}_{i}' for i in C.columns]
+        else:
+            return [f'{self.prefix}_{self.Gname}_{i}' for i in range(C.shape[1])]
+
+
 class FeatureSelector(BaseEstimator, TransformerMixin):
     """
     Selects given features from a pandas DataFrame
@@ -221,3 +265,20 @@ def construct_data_pipeline(pd_output=False, feat_type=feat_type):
     else:
         data_pipeline = FeatureUnion(transformer_list=tlist)
     return data_pipeline
+
+
+def pandas_transformer(BaseTransformer):
+    """
+    """
+    class PdTransformer(BaseTransformer):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+        def transform(self, X):
+            try:
+                cols = super().get_feature_names(X.columns)
+            except AttributeError:
+                cols = X.columns
+            return pd.DataFrame(super().transform(X), columns=cols)
+
+    return PdTransformer
