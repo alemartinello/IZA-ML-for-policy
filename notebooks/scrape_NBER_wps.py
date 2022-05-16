@@ -1,10 +1,11 @@
-import requests
+import urllib3
 from bs4 import BeautifulSoup
 from datetime import datetime
 import json
 from pathlib import Path
 import os
 import ssl
+
 
 xmls = [
     "https://www.nber.org/wwpinfo/googleXML_h.xml",
@@ -79,8 +80,9 @@ def download_all_data(link):
     necessary metadata from the articles extracted by `get_article_data()`
     """
     start = datetime.now()
-    page = requests.get(link)
-    xml = BeautifulSoup(page.content, "html.parser")
+    http = urllib3.PoolManager()
+    page = http.request("GET", link)
+    xml = BeautifulSoup(page.data, "html.parser")
     print(f"{link} downloaded in {str(datetime.now() - start)}. Extracting data...")
     data = {}
 
